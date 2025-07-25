@@ -50,39 +50,10 @@ from hy3dpaint.convert_utils import create_glb_with_pbr_materials
 
 
 MAX_SEED = 1e7
-ENV = "Local" # "Huggingface"
-if ENV == 'Huggingface':
-    """
-    Setup environment for running on Huggingface platform.
+ENV = "Local" # Changed from "Huggingface" to "Local"
 
-    This block performs the following:
-    - Changes directory to the differentiable renderer folder and runs a shell 
-        script to compile the mesh painter.
-    - Installs a custom rasterizer wheel package via pip.
-
-    Note:
-        This setup assumes the script is running in the Huggingface environment 
-        with the specified directory structure.
-    """
-    import os, spaces, subprocess, sys, shlex
-    print("cd /home/user/app/hy3dgen/texgen/differentiable_renderer/ && bash compile_mesh_painter.sh")
-    os.system("cd /home/user/app/hy3dgen/texgen/differentiable_renderer/ && bash compile_mesh_painter.sh")
-    print('install custom')
-    subprocess.run(shlex.split("pip install custom_rasterizer-0.1-cp310-cp310-linux_x86_64.whl"),
-                   check=True)
-else:
-    """
-    Define a dummy `spaces` module with a GPU decorator class for local environment.
-
-    The GPU decorator is a no-op that simply returns the decorated function unchanged.
-    This allows code that uses the `spaces.GPU` decorator to run without modification locally.
-    """
-    class spaces:
-        class GPU:
-            def __init__(self, duration=60):
-                self.duration = duration
-            def __call__(self, func):
-                return func 
+# No need for the Huggingface-specific setup anymore
+# Remove spaces module entirely since we're not using ZeroGPU
 
 def get_example_img_list():
     """
@@ -213,7 +184,7 @@ height="{height}" width="100%" frameborder="0"></iframe>'
         </div>
     """
 
-@spaces.GPU(duration=60)
+# Removed @spaces.GPU decorator
 def _gen_shape(
     caption=None,
     image=None,
@@ -322,7 +293,7 @@ def _gen_shape(
     main_image = image if not MV_MODE else image['front']
     return mesh, main_image, save_folder, stats, seed
 
-@spaces.GPU(duration=60)
+# Removed @spaces.GPU decorator
 def generation_all(
     caption=None,
     image=None,
@@ -404,7 +375,7 @@ def generation_all(
         seed,
     )
 
-@spaces.GPU(duration=60)
+# Removed @spaces.GPU decorator
 def shape_generation(
     caption=None,
     image=None,
@@ -791,24 +762,12 @@ if __name__ == '__main__':
             except Exception as fix_error:
                 print(f"Warning: Failed to apply torchvision fix: {fix_error}")
             
-            # from hy3dgen.texgen import Hunyuan3DPaintPipeline
-            # texgen_worker = Hunyuan3DPaintPipeline.from_pretrained(args.texgen_model_path)
-            # if args.low_vram_mode:
-            #     texgen_worker.enable_model_cpu_offload()
-
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
             conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
             conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
             conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
             conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
             tex_pipeline = Hunyuan3DPaintPipeline(conf)
-        
-            # Not help much, ignore for now.
-            # if args.compile:
-            #     texgen_worker.models['delight_model'].pipeline.unet.compile()
-            #     texgen_worker.models['delight_model'].pipeline.vae.compile()
-            #     texgen_worker.models['multiview_model'].pipeline.unet.compile()
-            #     texgen_worker.models['multiview_model'].pipeline.vae.compile()
             
             HAS_TEXTUREGEN = True
             
@@ -820,31 +779,42 @@ if __name__ == '__main__':
             print('Please try to install requirements by following README.md')
             HAS_TEXTUREGEN = False
 
-    HAS_T2I = True
+    HAS_T2I = False  # Disabled by default for now
     if args.enable_t23d:
-        from hy3dgen.text2image import HunyuanDiTPipeline
-
-        t2i_worker = HunyuanDiTPipeline('Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled')
-        HAS_T2I = True
+        try:
+            from hy3dgen.text2image import HunyuanDiTPipeline
+            t2i_worker = HunyuanDiTPipeline('Tencent-Hunyuan/HunyuanDiT-v1.1-Diffusers-Distilled')
+            HAS_T2I = True
+        except Exception as e:
+            print(f"Failed to load text-to-image model: {e}")
+            HAS_T2I = False
 
     from hy3dshape import FaceReducer, FloaterRemover, DegenerateFaceRemover, MeshSimplifier, \
         Hunyuan3DDiTFlowMatchingPipeline
     from hy3dshape.pipelines import export_to_trimesh
     from hy3dshape.rembg import BackgroundRemover
 
+    # Initialize workers
+    print("Initializing background remover...")
     rmbg_worker = BackgroundRemover()
+    
+    print("Loading Hunyuan3D model...")
     i23d_worker = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         args.model_path,
         subfolder=args.subfolder,
         use_safetensors=False,
         device=args.device,
     )
+    
     if args.enable_flashvdm:
         mc_algo = 'mc' if args.device in ['cpu', 'mps'] else args.mc_algo
         i23d_worker.enable_flashvdm(mc_algo=mc_algo)
+    
     if args.compile:
+        print("Compiling model for faster inference...")
         i23d_worker.compile()
 
+    print("Initializing mesh processors...")
     floater_remove_worker = FloaterRemover()
     degenerate_face_remove_worker = DegenerateFaceRemover()
     face_reduce_worker = FaceReducer()
@@ -861,6 +831,10 @@ if __name__ == '__main__':
 
     if args.low_vram_mode:
         torch.cuda.empty_cache()
+        print("Low VRAM mode enabled - will clear GPU cache between operations")
+    
     demo = build_app()
     app = gr.mount_gradio_app(app, demo, path="/")
+    
+    print(f"Starting server on {args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port)
