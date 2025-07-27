@@ -1,5 +1,7 @@
 import os
 import sys
+import gc
+import torch
 from PIL import Image
 from tqdm import tqdm
 
@@ -21,6 +23,13 @@ except ImportError:
     print("Warning: torchvision_fix module not found, proceeding without compatibility fix.")
 except Exception as e:
     print(f"Warning: Failed to apply torchvision fix: {e}")
+
+# Memory management function
+def clear_memory():
+    """Clear GPU and system memory"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 # --- Initialize Pipelines ---
 print("Info: Initializing Hunyuan 3D pipelines...")
@@ -55,6 +64,9 @@ except Exception as e:
     print(f"Error: Failed to load texture generation pipeline. Check config and file paths. {e}")
     sys.exit(1)
 
+# Clear memory after initialization
+clear_memory()
+
 # --- Define I/O Directories ---
 input_dir = "/data/in"
 output_dir = "/data/out"
@@ -87,17 +99,28 @@ for img_name in tqdm(images, desc="Processing images"):
     print(f"\n--- Starting processing for {img_name} ---")
     
     try:
-        # Load image and ensure it has an alpha channel
+        # Load image and convert to RGBA
         image = Image.open(img_path).convert("RGBA")
-        if image.mode == "RGB":
+        
+        # FIXED: Remove background if image is RGB (has no transparency)
+        # The original logic was backwards - we need to check the original mode before conversion
+        original_image = Image.open(img_path)
+        if original_image.mode == 'RGB':
             print(f"Info: Removing background from {img_name}...")
             image = rembg_processor(image)
+        
+        # Clear memory after background removal
+        clear_memory()
 
         # Stage 1: Generate 3D mesh (untextured)
         print(f"Info: Generating 3D mesh from {img_name}...")
         mesh = shape_pipeline(image=image)[0]
         mesh.export(temp_mesh_path)
         print(f"Info: Untextured mesh saved to {temp_mesh_path}")
+        
+        # Clear memory after mesh generation
+        del mesh
+        clear_memory()
 
         # Stage 2: Apply texture to the mesh
         print(f"Info: Applying texture to the mesh...")
@@ -108,12 +131,23 @@ for img_name in tqdm(images, desc="Processing images"):
         )
         print(f"Info: Textured mesh saved to {output_path}")
 
+        # Clear memory after texture generation
+        clear_memory()
+
         # Clean up the intermediate mesh file
         os.remove(temp_mesh_path)
         print(f"Info: Removed intermediate file {temp_mesh_path}")
+        
+        # Clean up image variables
+        del image, original_image
+        
+        # Force garbage collection between images
+        clear_memory()
 
     except Exception as e:
         print(f"\n[ERROR] Failed processing {img_name}: {e}")
+        # Clear memory even on error
+        clear_memory()
         # Log the error and move to the next image
 
 print("\nAll images processed. Script finished.")
