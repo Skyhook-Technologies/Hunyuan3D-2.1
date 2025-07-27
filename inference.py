@@ -134,20 +134,33 @@ for img_name in tqdm(images, desc="Processing images"):
         # Clear memory after texture generation
         clear_memory()
 
-        # Clean up the intermediate mesh file
-        os.remove(temp_mesh_path)
-        print(f"Info: Removed intermediate file {temp_mesh_path}")
+        print(f"Info: Processing completed successfully for {img_name}")
         
-        # Clean up image variables
-        del image, original_image
-        
-        # Force garbage collection between images
-        clear_memory()
-
     except Exception as e:
         print(f"\n[ERROR] Failed processing {img_name}: {e}")
         # Clear memory even on error
         clear_memory()
         # Log the error and move to the next image
+    
+    finally:
+        # ALWAYS clean up intermediate files and variables, even on error
+        try:
+            if os.path.exists(temp_mesh_path):
+                os.remove(temp_mesh_path)
+                print(f"Info: Cleaned up intermediate file {temp_mesh_path}")
+        except Exception as cleanup_error:
+            print(f"Warning: Failed to clean up {temp_mesh_path}: {cleanup_error}")
+        
+        # Clean up image variables if they exist
+        try:
+            if 'image' in locals():
+                del image
+            if 'original_image' in locals():
+                del original_image
+        except:
+            pass
+        
+        # Final memory cleanup
+        clear_memory()
 
 print("\nAll images processed. Script finished.")
