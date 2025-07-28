@@ -225,7 +225,7 @@ for img_name in tqdm(images, desc="Processing images"):
         
         # Face reduction (HuggingFace uses default 10000 faces)
         print("Info: Reducing mesh faces...")
-        mesh = face_reduce_worker(mesh, target_face_num=10000)
+        mesh = face_reduce_worker(mesh, 10000)
         print(f"Info: Reduced mesh - Faces: {mesh.faces.shape[0]}, Vertices: {mesh.vertices.shape[0]}")
         
         # Export as OBJ for texture painting (HuggingFace exports as 'obj' before texturing)
