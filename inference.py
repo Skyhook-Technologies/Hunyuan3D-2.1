@@ -1,8 +1,9 @@
 import os
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import sys
 import gc
+import glob
 import torch
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 from PIL import Image
 from tqdm import tqdm
 
@@ -31,6 +32,60 @@ def clear_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
+
+# Enhanced cleanup function
+def cleanup_intermediate_files(base_name, output_dir):
+    """Remove all intermediate files except the final textured GLB"""
+    final_output = os.path.join(output_dir, base_name + "_textured.glb")
+    
+    # Patterns of intermediate files to remove
+    patterns_to_remove = [
+        f"{base_name}_mesh.glb",           # Untextured mesh
+        f"{base_name}_textured.jpg",       # Texture image
+        f"{base_name}_textured.mtl",       # Material file
+        f"{base_name}_textured_metallic.jpg",  # Metallic map
+        f"{base_name}_textured_roughness.jpg", # Roughness map
+        "white_mesh_remesh.obj",           # Remeshed geometry
+        f"{base_name}_*.obj",              # Any obj files
+        f"{base_name}_*.jpg",              # Any remaining jpg files (except final if needed)
+        f"{base_name}_*.mtl",              # Any remaining mtl files
+        f"{base_name}_*.png",              # Any intermediate png files
+    ]
+    
+    files_removed = []
+    for pattern in patterns_to_remove:
+        pattern_path = os.path.join(output_dir, pattern)
+        matching_files = glob.glob(pattern_path)
+        
+        for file_path in matching_files:
+            # Don't remove the final textured GLB file
+            if file_path != final_output:
+                try:
+                    os.remove(file_path)
+                    files_removed.append(os.path.basename(file_path))
+                except Exception as e:
+                    print(f"Warning: Failed to remove {file_path}: {e}")
+    
+    # Also check for any files that might be created in current directory
+    current_dir_patterns = [
+        "white_mesh_remesh.obj",
+        "*.tmp",
+        "temp_*"
+    ]
+    
+    for pattern in current_dir_patterns:
+        matching_files = glob.glob(pattern)
+        for file_path in matching_files:
+            try:
+                os.remove(file_path)
+                files_removed.append(os.path.basename(file_path))
+            except Exception as e:
+                print(f"Warning: Failed to remove {file_path}: {e}")
+    
+    if files_removed:
+        print(f"Info: Cleaned up intermediate files: {', '.join(files_removed)}")
+    else:
+        print("Info: No intermediate files found to clean up")
 
 # --- Initialize Pipelines ---
 print("Info: Initializing Hunyuan 3D pipelines...")
@@ -144,13 +199,8 @@ for img_name in tqdm(images, desc="Processing images"):
         # Log the error and move to the next image
     
     finally:
-        # ALWAYS clean up intermediate files and variables, even on error
-        try:
-            if os.path.exists(temp_mesh_path):
-                os.remove(temp_mesh_path)
-                print(f"Info: Cleaned up intermediate file {temp_mesh_path}")
-        except Exception as cleanup_error:
-            print(f"Warning: Failed to clean up {temp_mesh_path}: {cleanup_error}")
+        # ENHANCED: Clean up ALL intermediate files, not just the temp mesh
+        cleanup_intermediate_files(base_name, output_dir)
         
         # Clean up image variables if they exist
         try:
