@@ -100,7 +100,7 @@ conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
 conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
 conf.multiview_cfg_path   = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
 conf.custom_pipeline      = "hy3dpaint/hunyuanpaintpbr"
-paint_pipeline = Hanyu3DPaintPipeline(conf)
+paint_pipeline = Hunyuan3DPaintPipeline(conf)
 print("Info: Texture generation pipeline loaded.")
 
 clear_memory()
