@@ -89,11 +89,11 @@ print("Info: Shape generation pipeline loaded.")
 rembg_processor = BackgroundRemover()
 print("Info: Background remover initialized.")
 
-# Post‑processing workers
+# Post-processing workers
 floater_remove_worker       = FloaterRemover()
 degenerate_face_remove_worker = DegenerateFaceRemover()
 face_reduce_worker          = FaceReducer()
-print("Info: Post‑processing workers initialized.")
+print("Info: Post-processing workers initialized.")
 
 # Texture generation pipeline (6 views, 512 res)
 conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
@@ -157,6 +157,13 @@ for img_name in tqdm(images, desc="Processing images"):
         print(f"Info: Mesh faces={mesh.faces.shape[0]}, verts={mesh.vertices.shape[0]}")
         clear_memory()
 
+        # FIXED: Apply floater and degenerate face removal BEFORE face reduction and texturing.
+        # This ensures the texture is applied to a cleaner mesh.
+        print("Info: Initial mesh cleanup (floater and degenerate faces)")
+        mesh = floater_remove_worker(mesh)
+        mesh = degenerate_face_remove_worker(mesh)
+        clear_memory()
+
         # 3) Face reduction & OBJ export
         print("Info: Reducing faces")
         mesh = face_reduce_worker(mesh)  # default ~10000 faces
@@ -183,12 +190,8 @@ for img_name in tqdm(images, desc="Processing images"):
         create_glb_with_pbr_materials(textured_obj, textures, final_glb)
         clear_memory()
 
-        # 6) Final floater/degenerate cleanup
-        print("Info: Final mesh cleanup")
-        final_mesh = trimesh.load(final_glb)
-        final_mesh = floater_remove_worker(final_mesh)
-        final_mesh = degenerate_face_remove_worker(final_mesh)
-        final_mesh.export(final_glb)
+        # Removed the final floater/degenerate cleanup as it's now done earlier.
+        # The GLB is now directly saved.
 
         print(f"Saved: {final_glb}")
 
