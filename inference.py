@@ -125,9 +125,10 @@ MAX_SEED = int(1e7)
 for img_name in tqdm(images, desc="Processing images"):
     base = os.path.splitext(img_name)[0]
     img_path = os.path.join(input_dir, img_name)
-    temp_obj     = os.path.join(output_dir, f"{base}_mesh.obj")
-    textured_obj = os.path.join(output_dir, f"{base}_textured.obj")
-    final_glb    = os.path.join(output_dir, f"{base}_textured.glb")
+    # Intermediate OBJ before texturing (will be reduced)
+    reduced_obj_pre_texture = os.path.join(output_dir, f"{base}_mesh_reduced_pre_texture.obj")
+    textured_obj_path = os.path.join(output_dir, f"{base}_textured.obj")
+    final_glb_path    = os.path.join(output_dir, f"{base}_textured.glb")
 
     print(f"\n--- Processing {img_name} ---")
     try:
@@ -157,48 +158,52 @@ for img_name in tqdm(images, desc="Processing images"):
         print(f"Info: Mesh faces={mesh.faces.shape[0]}, verts={mesh.vertices.shape[0]}")
         clear_memory()
 
-        # FIXED: Apply floater and degenerate face removal BEFORE face reduction and texturing.
-        # This ensures the texture is applied to a cleaner mesh.
-        print("Info: Initial mesh cleanup (floater and degenerate faces)")
+        # 3) Initial Mesh Cleanup (floaters and degenerate faces)
+        # These are foundational cleanups found in on_export_click and crucial for mesh integrity.
+        print("Info: Applying initial mesh cleanup (floater and degenerate faces removal)")
         mesh = floater_remove_worker(mesh)
         mesh = degenerate_face_remove_worker(mesh)
         clear_memory()
 
-        # 3) Face reduction & OBJ export
-        print("Info: Reducing faces")
-        mesh = face_reduce_worker(mesh)  # default ~10000 faces
-        mesh.export(temp_obj, include_normals=True)
+        # 4) Face reduction - EXACTLY as in gradio_app.py's generation_all
+        # This happens *before* texturing.
+        print("Info: Reducing faces on the initial mesh")
+        mesh = face_reduce_worker(mesh) # default ~10000 faces
         clear_memory()
 
-        # 4) Texture painting → OBJ
-        print("Info: Painting texture")
+        # Export this reduced mesh as an intermediate OBJ for texture painting
+        mesh.export(reduced_obj_pre_texture, include_normals=True)
+        clear_memory()
+
+        # 5) Texture painting - done on the *reduced* mesh
+        print("Info: Painting texture onto the reduced mesh")
         paint_pipeline(
-            mesh_path=temp_obj,
+            mesh_path=reduced_obj_pre_texture,
             image_path=img_path,
-            output_mesh_path=textured_obj,
-            save_glb=False
+            output_mesh_path=textured_obj_path,
+            save_glb=False # We will handle GLB conversion with PBR explicitly
         )
         clear_memory()
 
-        # 5) OBJ → GLB with PBR
-        print("Info: Converting OBJ to GLB")
+        # 6) OBJ → GLB with PBR materials
+        print("Info: Converting textured OBJ to GLB with PBR materials")
         textures = {
-            'albedo':    textured_obj.replace('.obj', '.jpg'),
-            'metallic':  textured_obj.replace('.obj', '_metallic.jpg'),
-            'roughness': textured_obj.replace('.obj', '_roughness.jpg'),
+            'albedo':    textured_obj_path.replace('.obj', '.jpg'),
+            'metallic':  textured_obj_path.replace('.obj', '_metallic.jpg'),
+            'roughness': textured_obj_path.replace('.obj', '_roughness.jpg'),
         }
-        create_glb_with_pbr_materials(textured_obj, textures, final_glb)
+        create_glb_with_pbr_materials(textured_obj_path, textures, final_glb_path)
         clear_memory()
 
-        # Removed the final floater/degenerate cleanup as it's now done earlier.
-        # The GLB is now directly saved.
-
-        print(f"Saved: {final_glb}")
+        print(f"Saved: {final_glb_path}")
 
     except Exception as e:
         print(f"[ERROR] {base}: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
 
     finally:
+        # Ensure cleanup removes the new intermediate file as well
         cleanup_intermediate_files(base, output_dir)
         clear_memory()
 
