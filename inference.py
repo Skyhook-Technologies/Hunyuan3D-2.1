@@ -190,7 +190,7 @@ for img_name in tqdm(images, desc="Processing images"):
         final_mesh = degenerate_face_remove_worker(final_mesh)
         final_mesh.export(final_glb)
 
-        print(f"✅ Saved: {final_glb}")
+        print(f"Saved: {final_glb}")
 
     except Exception as e:
         print(f"[ERROR] {base}: {e}")
