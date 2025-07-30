@@ -78,7 +78,7 @@ logger.info("Initializing Hunyuan3D workers...")
 
 # Import required modules for workers
 from hy3dshape import FaceReducer, FloaterRemover, DegenerateFaceRemover, Hunyuan3DDiTFlowMatchingPipeline
-from hy3dshape.pipelines import export_to_trimesh
+from hy3dshape.pipelines import export_to_trimesh  # This is the correct import location
 from hy3dshape.rembg import BackgroundRemover
 from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
 from hy3dpaint.convert_utils import create_glb_with_pbr_materials
@@ -95,6 +95,9 @@ gradio_app.floater_remove_worker = FloaterRemover()
 gradio_app.degenerate_face_remove_worker = DegenerateFaceRemover()
 gradio_app.face_reduce_worker = FaceReducer()
 
+# Make export_to_trimesh available in gradio_app module
+gradio_app.export_to_trimesh = export_to_trimesh
+
 # Initialize texture pipeline
 if not args.disable_tex:
     try:
@@ -109,8 +112,8 @@ if not args.disable_tex:
         logger.error(f"Failed to load texture generator: {e}")
         gradio_app.HAS_TEXTUREGEN = False
 
-# Import the functions we need
-from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, export_to_trimesh, quick_convert_with_obj2gltf
+# Import the functions we need from gradio_app
+from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
 
 logger.info("Successfully initialized Hunyuan3D environment")
 
