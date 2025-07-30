@@ -1,37 +1,53 @@
 import os
 import sys
 import gc
-import glob
+import shutil
 import torch
 import random
-import trimesh
-import numpy as np
 from PIL import Image
 from tqdm import tqdm
+import logging
+from pathlib import Path
+import glob
 
 # Ensure expandable segments for CUDA
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
-# Add Hunyuan3D code paths
-sys.path.insert(0, './hy3dshape')
-sys.path.insert(0, './hy3dpaint')
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('inference.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Core imports
-from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline, export_to_trimesh
-from hy3dshape.rembg import BackgroundRemover
-from hy3dshape import FaceReducer, FloaterRemover, DegenerateFaceRemover
-from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-from hy3dpaint.convert_utils import create_glb_with_pbr_materials
+# ——— Setup gradio_app environment —————————————————————————————————————————————
 
-# Apply torchvision compatibility fix
+# CRITICAL: Set up args BEFORE importing gradio_app
+sys.argv = [
+    'gradio_app.py',
+    '--model_path', 'tencent/Hunyuan3D-2.1',
+    '--subfolder', 'hunyuan3d-dit-v2-1',
+    '--texgen_model_path', 'tencent/Hunyuan3D-2.1',
+    '--cache-path', './temp_cache',  # Temporary cache directory
+    '--device', 'cuda',
+    '--mc_algo', 'mc',
+    # Don't add flags like --enable_t23d, --compile, etc. since we want defaults
+]
+
+logger.info("Initializing Hunyuan3D through gradio_app...")
+
+# Import gradio_app AFTER setting sys.argv - this triggers initialization
 try:
-    from torchvision_fix import apply_fix
-    apply_fix()
-    print("Info: torchvision compatibility fix applied successfully.")
-except ImportError:
-    print("Warning: torchvision_fix module not found, proceeding without compatibility fix.")
+    import gradio_app
+    from gradio_app import generation_all, on_export_click, gen_save_folder
+    logger.info("Successfully imported gradio_app functions")
 except Exception as e:
-    print(f"Warning: Failed to apply torchvision fix: {e}")
+    logger.error(f"Failed to import gradio_app: {e}")
+    sys.exit(1)
 
 # ——— Utility functions —————————————————————————————————————————————————————
 
@@ -41,170 +57,171 @@ def clear_memory():
         torch.cuda.empty_cache()
     gc.collect()
 
-def cleanup_intermediate_files(base_name, output_dir):
-    """Remove all intermediate files except the final textured GLB."""
-    final_output = os.path.join(output_dir, base_name + "_textured.glb")
+def cleanup_temp_folders(base_save_dir):
+    """Clean up temporary folders created by gen_save_folder."""
+    if os.path.exists(base_save_dir):
+        # Keep only the most recent folders to prevent disk fill
+        folders = sorted(
+            [f for f in Path(base_save_dir).iterdir() if f.is_dir()],
+            key=lambda x: x.stat().st_mtime
+        )
+        # Keep last 5 folders, remove older ones
+        if len(folders) > 5:
+            for folder in folders[:-5]:
+                try:
+                    shutil.rmtree(folder)
+                    logger.debug(f"Removed old temp folder: {folder}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove {folder}: {e}")
+
+def cleanup_output_dir(base_name, output_dir):
+    """Remove any intermediate files, keeping only the final GLB."""
+    final_output = os.path.join(output_dir, f"{base_name}_textured.glb")
     patterns = [
-        f"{base_name}_mesh.glb",
-        f"{base_name}_mesh.obj",
-        f"{base_name}_textured.obj",
-        f"{base_name}_textured.jpg",
-        f"{base_name}_textured.mtl",
-        f"{base_name}_textured_metallic.jpg",
-        f"{base_name}_textured_roughness.jpg",
         f"{base_name}_*.obj",
         f"{base_name}_*.jpg",
-        f"{base_name}_*.mtl",
         f"{base_name}_*.png",
-        "white_mesh_remesh.obj",
-        "*.tmp",
-        "temp_*"
+        f"{base_name}_*.mtl",
+        "temp_*",
+        "*.tmp"
     ]
-    removed = []
-    for pat in patterns:
-        for fpath in glob.glob(os.path.join(output_dir, pat)):
-            if os.path.abspath(fpath) != os.path.abspath(final_output):
+    
+    for pattern in patterns:
+        for filepath in glob.glob(os.path.join(output_dir, pattern)):
+            if os.path.abspath(filepath) != os.path.abspath(final_output):
                 try:
-                    os.remove(fpath)
-                    removed.append(os.path.basename(fpath))
+                    os.remove(filepath)
                 except:
                     pass
-    if removed:
-        print(f"Info: Cleaned up intermediates: {', '.join(removed)}")
 
-# ——— Initialize pipelines —————————————————————————————————————————————————————
+# ——— Main processing —————————————————————————————————————————————————————
 
-print("Info: Initializing Hunyuan 3D pipelines...")
-
-# Shape generation pipeline
-shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-    'tencent/Hunyuan3D-2.1',
-    subfolder='hunyuan3d-dit-v2-1',  # CRITICAL
-    use_safetensors=False,
-    device='cuda'
-)
-print("Info: Shape generation pipeline loaded.")
-
-# Background remover
-rembg_processor = BackgroundRemover()
-print("Info: Background remover initialized.")
-
-# Post-processing workers
-floater_remove_worker       = FloaterRemover()
-degenerate_face_remove_worker = DegenerateFaceRemover()
-face_reduce_worker          = FaceReducer()
-print("Info: Post-processing workers initialized.")
-
-# Texture generation pipeline (6 views, 512 res)
-conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
-conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
-conf.multiview_cfg_path   = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
-conf.custom_pipeline      = "hy3dpaint/hunyuanpaintpbr"
-paint_pipeline = Hunyuan3DPaintPipeline(conf)
-print("Info: Texture generation pipeline loaded.")
-
-clear_memory()
-
-# ——— I/O setup ——————————————————————————————————————————————————————————————
-
-input_dir  = "/data/in"
-output_dir = "/data/out"
-os.makedirs(output_dir, exist_ok=True)
-print(f"Info: Input directory: {input_dir}")
-print(f"Info: Output directory: {output_dir}")
-
-# Collect PNGs
-images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".png")])
-if not images:
-    print("Warning: No PNGs found in input directory; exiting.")
-    sys.exit(0)
-
-# ——— Batch processing loop —————————————————————————————————————————————————————
-
-MAX_SEED = int(1e7)
-for img_name in tqdm(images, desc="Processing images"):
-    base = os.path.splitext(img_name)[0]
-    img_path = os.path.join(input_dir, img_name)
-    # Intermediate OBJ before texturing (will be reduced)
-    reduced_obj_pre_texture = os.path.join(output_dir, f"{base}_mesh_reduced_pre_texture.obj")
-    textured_obj_path = os.path.join(output_dir, f"{base}_textured.obj")
-    final_glb_path    = os.path.join(output_dir, f"{base}_textured.glb")
-
-    print(f"\n--- Processing {img_name} ---")
+def process_image(img_path, base_name, output_dir):
+    """Process a single image through the Hunyuan3D pipeline."""
     try:
-        # 1) Load & remove background if needed
-        orig = Image.open(img_path)
-        if orig.mode == "RGB":
-            print("Info: Removing background")
-            img = rembg_processor(orig.convert("RGB"))
-        else:
-            img = orig.convert("RGBA")
-        clear_memory()
-
-        # 2) Shape generation
-        seed = random.randint(0, MAX_SEED)
-        gen = torch.Generator().manual_seed(seed)
-        print(f"Info: Generating mesh (seed={seed})")
-        outputs = shape_pipeline(
-            image=img,
-            num_inference_steps=30,
+        # Load image
+        logger.info(f"Loading image: {img_path}")
+        image = Image.open(img_path).convert('RGBA')
+        
+        # Call generation_all - this handles everything (shape + texture)
+        logger.info(f"Generating 3D model for {base_name}...")
+        file_out, file_out2, html_output, stats, seed = generation_all(
+            caption=None,
+            image=image,
+            mv_image_front=None,
+            mv_image_back=None,
+            mv_image_left=None,
+            mv_image_right=None,
+            steps=30,
             guidance_scale=5.0,
-            generator=gen,
+            seed=1234,  # Will be randomized due to randomize_seed=True
             octree_resolution=256,
+            check_box_rembg=True,  # Remove background if needed
             num_chunks=8000,
-            output_type='mesh'
+            randomize_seed=True  # Ensures different seed each generation
         )
-        mesh = export_to_trimesh(outputs)[0]
-        print(f"Info: Mesh faces={mesh.faces.shape[0]}, verts={mesh.vertices.shape[0]}")
-        clear_memory()
-
-        # 3) Initial Mesh Cleanup (floaters and degenerate faces)
-        # These are foundational cleanups found in on_export_click and crucial for mesh integrity.
-        print("Info: Applying initial mesh cleanup (floater and degenerate faces removal)")
-        mesh = floater_remove_worker(mesh)
-        mesh = degenerate_face_remove_worker(mesh)
-        clear_memory()
-
-        # 4) Face reduction - EXACTLY as in gradio_app.py's generation_all
-        # This happens *before* texturing.
-        print("Info: Reducing faces on the initial mesh")
-        mesh = face_reduce_worker(mesh) # default ~10000 faces
-        clear_memory()
-
-        # Export this reduced mesh as an intermediate OBJ for texture painting
-        mesh.export(reduced_obj_pre_texture, include_normals=True)
-        clear_memory()
-
-        # 5) Texture painting - done on the *reduced* mesh
-        print("Info: Painting texture onto the reduced mesh")
-        paint_pipeline(
-            mesh_path=reduced_obj_pre_texture,
-            image_path=img_path,
-            output_mesh_path=textured_obj_path,
-            save_glb=False # We will handle GLB conversion with PBR explicitly
+        
+        logger.info(f"Shape and texture generation complete. Seed used: {seed}")
+        logger.info(f"Stats: {stats.get('number_of_faces', 'N/A')} faces, {stats.get('number_of_vertices', 'N/A')} vertices")
+        
+        # Call on_export_click to get final GLB with proper export settings
+        logger.info(f"Exporting final GLB with face reduction...")
+        html_export, file_export = on_export_click(
+            file_out=file_out.value if hasattr(file_out, 'value') else file_out,
+            file_out2=file_out2.value if hasattr(file_out2, 'value') else file_out2,
+            file_type="glb",
+            reduce_face=True,
+            export_texture=True,
+            target_face_num=10000
         )
+        
+        # Extract the actual file path from the file_export object
+        if hasattr(file_export, 'value'):
+            export_path = file_export.value
+        else:
+            export_path = file_export
+            
+        logger.info(f"Export complete: {export_path}")
+        
+        # Move the final file to output directory with our naming convention
+        final_path = os.path.join(output_dir, f"{base_name}_textured.glb")
+        shutil.move(export_path, final_path)
+        logger.info(f"Saved final model: {final_path}")
+        
+        # Clear memory after each generation
         clear_memory()
-
-        # 6) OBJ → GLB with PBR materials
-        print("Info: Converting textured OBJ to GLB with PBR materials")
-        textures = {
-            'albedo':    textured_obj_path.replace('.obj', '.jpg'),
-            'metallic':  textured_obj_path.replace('.obj', '_metallic.jpg'),
-            'roughness': textured_obj_path.replace('.obj', '_roughness.jpg'),
-        }
-        create_glb_with_pbr_materials(textured_obj_path, textures, final_glb_path)
-        clear_memory()
-
-        print(f"Saved: {final_glb_path}")
-
+        
+        return True, final_path
+        
     except Exception as e:
-        print(f"[ERROR] {base}: {e}")
+        logger.error(f"Error processing {base_name}: {e}")
         import traceback
-        traceback.print_exc() # Print full traceback for debugging
-
-    finally:
-        # Ensure cleanup removes the new intermediate file as well
-        cleanup_intermediate_files(base, output_dir)
+        traceback.print_exc()
         clear_memory()
+        return False, None
 
-print("\nAll done.")
+# ——— Main execution —————————————————————————————————————————————————————
+
+def main():
+    # I/O directories
+    input_dir = "/data/in"
+    output_dir = "/data/out"
+    
+    # Ensure directories exist
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs('./temp_cache', exist_ok=True)
+    
+    logger.info(f"Input directory: {input_dir}")
+    logger.info(f"Output directory: {output_dir}")
+    
+    # Collect PNG images
+    images = sorted([f for f in os.listdir(input_dir) if f.lower().endswith('.png')])
+    
+    if not images:
+        logger.warning("No PNG images found in input directory")
+        return
+    
+    logger.info(f"Found {len(images)} images to process")
+    
+    # Process each image
+    success_count = 0
+    failed_images = []
+    
+    for img_name in tqdm(images, desc="Processing images"):
+        base_name = os.path.splitext(img_name)[0]
+        img_path = os.path.join(input_dir, img_name)
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing {img_name} ({images.index(img_name)+1}/{len(images)})")
+        logger.info(f"{'='*60}")
+        
+        success, final_path = process_image(img_path, base_name, output_dir)
+        
+        if success:
+            success_count += 1
+        else:
+            failed_images.append(img_name)
+        
+        # Clean up temporary folders periodically
+        cleanup_temp_folders('./temp_cache')
+        
+        # Clean up any intermediate files in output dir
+        cleanup_output_dir(base_name, output_dir)
+    
+    # Final summary
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Processing complete!")
+    logger.info(f"Successful: {success_count}/{len(images)}")
+    if failed_images:
+        logger.info(f"Failed: {failed_images}")
+    logger.info(f"{'='*60}")
+    
+    # Final cleanup of temp cache
+    try:
+        shutil.rmtree('./temp_cache')
+        logger.info("Cleaned up temporary cache directory")
+    except:
+        pass
+
+if __name__ == "__main__":
+    main()
