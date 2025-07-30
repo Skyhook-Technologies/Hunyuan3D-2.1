@@ -9,6 +9,7 @@ from tqdm import tqdm
 import logging
 from pathlib import Path
 import glob
+import trimesh
 
 # Ensure expandable segments for CUDA
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -39,22 +40,25 @@ sys.argv = [
 
 logger.info("Initializing Hunyuan3D through gradio_app...")
 
-# Import gradio_app AFTER setting sys.argv - this triggers initialization
-try:
-    import gradio_app
-    # We can only import top-level functions and classes
-    from gradio_app import generation_all, shape_generation, gen_save_folder, export_mesh, \
-        floater_remove_worker, degenerate_face_remove_worker, face_reduce_worker
-    
-    # Import Trimesh for handling the export logic
-    import trimesh
-    
-    logger.info("Successfully imported gradio_app functions")
-except Exception as e:
-    logger.error(f"Failed to import gradio_app: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+# Add paths before importing
+sys.path.insert(0, './hy3dshape')
+sys.path.insert(0, './hy3dpaint')
+
+# Import and run gradio_app initialization
+import gradio_app
+
+# Now we need to trigger the initialization that happens in if __name__ == '__main__':
+# We'll access the initialized variables through the gradio_app module
+logger.info("Waiting for gradio_app initialization...")
+
+# The workers are initialized in the main block, so we need to access them after import
+# Import the functions we can access
+from gradio_app import generation_all, shape_generation, gen_save_folder, export_mesh
+
+# Also import the conversion function
+from hy3dpaint.convert_utils import create_glb_with_pbr_materials
+
+logger.info("Successfully imported core functions")
 
 # ——— Utility functions —————————————————————————————————————————————————————
 
@@ -101,35 +105,6 @@ def cleanup_output_dir(base_name, output_dir):
                 except:
                     pass
 
-# ——— Implement the export logic from on_export_click —————————————————————————
-
-def export_textured_mesh(file_out, file_out2, output_path, target_face_num=10000):
-    """
-    Replicate the logic from on_export_click for textured mesh export.
-    This follows the exact logic from gradio_app.py's on_export_click function.
-    """
-    try:
-        # Load the textured mesh (file_out2 contains the textured version)
-        if hasattr(file_out2, 'value'):
-            mesh_path = file_out2.value
-        else:
-            mesh_path = file_out2
-            
-        logger.info(f"Loading textured mesh from: {mesh_path}")
-        mesh = trimesh.load(mesh_path)
-        
-        # No additional processing for textured meshes in on_export_click
-        # It just exports them directly
-        save_folder = gen_save_folder()
-        export_path = export_mesh(mesh, save_folder, textured=True, type='glb')
-        
-        logger.info(f"Exported textured mesh to: {export_path}")
-        return export_path
-        
-    except Exception as e:
-        logger.error(f"Error in export_textured_mesh: {e}")
-        raise
-
 # ——— Main processing —————————————————————————————————————————————————————
 
 def process_image(img_path, base_name, output_dir):
@@ -141,7 +116,7 @@ def process_image(img_path, base_name, output_dir):
         
         # Call generation_all - this handles everything (shape + texture)
         logger.info(f"Generating 3D model for {base_name}...")
-        file_out, file_out2, html_output, stats, seed = generation_all(
+        result = generation_all(
             caption=None,
             image=image,
             mv_image_front=None,
@@ -157,16 +132,27 @@ def process_image(img_path, base_name, output_dir):
             randomize_seed=True  # Ensures different seed each generation
         )
         
+        # Unpack the results - generation_all returns a tuple
+        file_out = result[0]
+        file_out2 = result[1]
+        html_output = result[2]
+        stats = result[3]
+        seed = result[4]
+        
         logger.info(f"Shape and texture generation complete. Seed used: {seed}")
         logger.info(f"Stats: {stats.get('number_of_faces', 'N/A')} faces, {stats.get('number_of_vertices', 'N/A')} vertices")
         
-        # Export the textured mesh with the same logic as on_export_click
-        logger.info(f"Exporting final textured GLB...")
-        export_path = export_textured_mesh(file_out, file_out2, output_dir, target_face_num=10000)
+        # Extract the actual file paths
+        if hasattr(file_out2, 'value'):
+            glb_path = file_out2.value
+        else:
+            glb_path = file_out2
+            
+        logger.info(f"Textured GLB generated at: {glb_path}")
         
         # Move the final file to output directory with our naming convention
         final_path = os.path.join(output_dir, f"{base_name}_textured.glb")
-        shutil.move(export_path, final_path)
+        shutil.copy2(glb_path, final_path)  # Use copy2 to preserve metadata
         logger.info(f"Saved final model: {final_path}")
         
         # Clear memory after each generation
