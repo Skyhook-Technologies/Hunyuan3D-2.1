@@ -78,7 +78,7 @@ logger.info("Initializing Hunyuan3D workers...")
 
 # Import required modules for workers
 from hy3dshape import FaceReducer, FloaterRemover, DegenerateFaceRemover, Hunyuan3DDiTFlowMatchingPipeline
-from hy3dshape.pipelines import export_to_trimesh  # This is the correct import location
+from hy3dshape.pipelines import export_to_trimesh
 from hy3dshape.rembg import BackgroundRemover
 from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
 from hy3dpaint.convert_utils import create_glb_with_pbr_materials
@@ -197,8 +197,10 @@ def process_image(img_path, base_name, output_dir):
         logger.info(f"Generation complete. Seed used: {seed}")
         logger.info(f"Stats: {stats.get('number_of_faces', 'N/A')} faces, {stats.get('number_of_vertices', 'N/A')} vertices")
         
-        # Extract the GLB path
-        if hasattr(file_out2, 'value'):
+        # Extract the GLB path from the Gradio update structure
+        if isinstance(file_out2, dict) and 'value' in file_out2:
+            glb_path = file_out2['value']
+        elif hasattr(file_out2, 'value'):
             glb_path = file_out2.value
         else:
             glb_path = file_out2
