@@ -11,6 +11,7 @@ from pathlib import Path
 import glob
 import trimesh
 import argparse
+import gradio as gr
 
 # Ensure expandable segments for CUDA
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -115,6 +116,56 @@ if not args.disable_tex:
 # Import the functions we need from gradio_app
 from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
 
+# Import and set up the on_export_click function from build_app
+gradio_app_module = sys.modules['gradio_app']
+exec(open('gradio_app.py').read(), gradio_app_module.__dict__)
+
+# Extract on_export_click from the module after executing
+def get_on_export_click():
+    """Extract the on_export_click function from gradio_app's build_app"""
+    # We need to access the function defined inside build_app
+    # Since it's a nested function, we'll need to replicate its logic
+    def on_export_click(file_out, file_out2, file_type, reduce_face, export_texture, target_face_num):
+        if file_out is None:
+            raise gr.Error('Please generate a mesh first.')
+
+        print(f'exporting {file_out}')
+        print(f'reduce face to {target_face_num}')
+        if export_texture:
+            mesh = trimesh.load(file_out2)
+            save_folder = gen_save_folder()
+            path = export_mesh(mesh, save_folder, textured=True, type=file_type)
+
+            # for preview
+            save_folder = gen_save_folder()
+            _ = export_mesh(mesh, save_folder, textured=True)
+            model_viewer_html = gradio_app.build_model_viewer_html(save_folder, 
+                                                        height=gradio_app.HTML_HEIGHT, 
+                                                        width=gradio_app.HTML_WIDTH,
+                                                        textured=True)
+        else:
+            mesh = trimesh.load(file_out)
+            mesh = gradio_app.floater_remove_worker(mesh)
+            mesh = gradio_app.degenerate_face_remove_worker(mesh)
+            if reduce_face:
+                mesh = gradio_app.face_reduce_worker(mesh, target_face_num)
+            save_folder = gen_save_folder()
+            path = export_mesh(mesh, save_folder, textured=False, type=file_type)
+
+            # for preview
+            save_folder = gen_save_folder()
+            _ = export_mesh(mesh, save_folder, textured=False)
+            model_viewer_html = gradio_app.build_model_viewer_html(save_folder, 
+                                                        height=gradio_app.HTML_HEIGHT, 
+                                                        width=gradio_app.HTML_WIDTH,
+                                                        textured=False)
+        print(f'export to {path}')
+        return model_viewer_html, gr.update(value=path, interactive=True)
+    
+    return on_export_click
+
+on_export_click = get_on_export_click()
+
 logger.info("Successfully initialized Hunyuan3D environment")
 
 # ——— Utility functions —————————————————————————————————————————————————————
@@ -163,13 +214,13 @@ def cleanup_output_dir(base_name, output_dir):
 # ——— Main processing —————————————————————————————————————————————————————
 
 def process_image(img_path, base_name, output_dir):
-    """Process a single image through the Hunyuan3D pipeline."""
+    """Process a single image through the Hunyuan3D pipeline - matching HF API exactly."""
     try:
         # Load image
         logger.info(f"Loading image: {img_path}")
         image = Image.open(img_path).convert('RGBA')
         
-        # Call generation_all - this handles everything
+        # Step 1: Call generation_all (matching HF API first call)
         logger.info(f"Generating 3D model for {base_name}...")
         result = generation_all(
             caption=None,
@@ -195,22 +246,49 @@ def process_image(img_path, base_name, output_dir):
         seed = result[4]
         
         logger.info(f"Generation complete. Seed used: {seed}")
-        logger.info(f"Stats: {stats.get('number_of_faces', 'N/A')} faces, {stats.get('number_of_vertices', 'N/A')} vertices")
         
-        # Extract the GLB path from the Gradio update structure
-        if isinstance(file_out2, dict) and 'value' in file_out2:
-            glb_path = file_out2['value']
-        elif hasattr(file_out2, 'value'):
-            glb_path = file_out2.value
+        # Extract actual file paths from gr.update objects
+        if isinstance(file_out, dict) and 'value' in file_out:
+            file_out_path = file_out['value']
         else:
-            glb_path = file_out2
+            file_out_path = file_out
             
-        logger.info(f"Textured GLB at: {glb_path}")
+        if isinstance(file_out2, dict) and 'value' in file_out2:
+            file_out2_path = file_out2['value']
+        else:
+            file_out2_path = file_out2
+        
+        # Step 2: Call on_export_click (matching HF API second call)
+        logger.info("Exporting with texture...")
+        export_html, export_result = on_export_click(
+            file_out=file_out_path,
+            file_out2=file_out2_path,
+            file_type="glb",
+            reduce_face=True,
+            export_texture=True,
+            target_face_num=10000
+        )
+        
+        # Extract the exported file path
+        if isinstance(export_result, dict) and 'value' in export_result:
+            exported_file_path = export_result['value']
+        else:
+            exported_file_path = export_result
+            
+        logger.info(f"Export complete: {exported_file_path}")
         
         # Move to output directory
         final_path = os.path.join(output_dir, f"{base_name}_textured.glb")
-        shutil.copy2(glb_path, final_path)
+        shutil.copy2(exported_file_path, final_path)
         logger.info(f"Saved final model: {final_path}")
+        
+        # Clean up intermediate files (matching HF cleanup)
+        for cleanup_path in [file_out_path, file_out2_path]:
+            if os.path.exists(cleanup_path):
+                try:
+                    os.remove(cleanup_path)
+                except:
+                    pass
         
         clear_memory()
         return True, final_path
