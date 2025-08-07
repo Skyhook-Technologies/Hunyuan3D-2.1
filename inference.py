@@ -219,6 +219,8 @@ def process_image(img_path, base_name, output_dir):
         # Load image
         logger.info(f"Loading image: {img_path}")
         image = Image.open(img_path).convert('RGBA')
+
+        random_seed = random.randint(0, int(1e7))
         
         # Step 1: Call generation_all (matching HF API first call)
         logger.info(f"Generating 3D model for {base_name}...")
@@ -231,11 +233,11 @@ def process_image(img_path, base_name, output_dir):
             mv_image_right=None,
             steps=30,
             guidance_scale=5.0,
-            seed=1234,
+            seed=random_seed,
             octree_resolution=256,
             check_box_rembg=True,
             num_chunks=8000,
-            randomize_seed=True
+            randomize_seed=False
         )
         
         # Unpack the results
