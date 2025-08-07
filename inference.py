@@ -4,6 +4,7 @@ import gc
 import shutil
 import torch
 import random
+random.seed()
 from PIL import Image
 from tqdm import tqdm
 import logging
@@ -113,12 +114,12 @@ if not args.disable_tex:
         logger.error(f"Failed to load texture generator: {e}")
         gradio_app.HAS_TEXTUREGEN = False
 
-# Import the functions we need from gradio_app
-from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
-
 # Import and set up the on_export_click function from build_app
 gradio_app_module = sys.modules['gradio_app']
 exec(open('gradio_app.py').read(), gradio_app_module.__dict__)
+
+# Import the functions we need from gradio_app
+from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
 
 # Extract on_export_click from the module after executing
 def get_on_export_click():
@@ -219,8 +220,6 @@ def process_image(img_path, base_name, output_dir):
         # Load image
         logger.info(f"Loading image: {img_path}")
         image = Image.open(img_path).convert('RGBA')
-
-        random_seed = random.randint(0, int(1e7))
         
         # Step 1: Call generation_all (matching HF API first call)
         logger.info(f"Generating 3D model for {base_name}...")
@@ -233,11 +232,11 @@ def process_image(img_path, base_name, output_dir):
             mv_image_right=None,
             steps=30,
             guidance_scale=5.0,
-            seed=random_seed,
+            seed=1234,
             octree_resolution=256,
             check_box_rembg=True,
             num_chunks=8000,
-            randomize_seed=False
+            randomize_seed=True
         )
         
         # Unpack the results
