@@ -13,6 +13,7 @@ import glob
 import trimesh
 import argparse
 import gradio as gr
+import time
 
 # Ensure expandable segments for CUDA
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
