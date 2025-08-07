@@ -125,7 +125,6 @@ from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_s
 import torch
 original_gen_shape = gradio_app._gen_shape
 
-@spaces.GPU(duration=60)
 def _gen_shape_fixed(
     caption=None,
     image=None,
