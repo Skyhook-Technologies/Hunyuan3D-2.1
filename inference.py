@@ -121,6 +121,121 @@ exec(open('gradio_app.py').read(), gradio_app_module.__dict__)
 # Import the functions we need from gradio_app
 from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
 
+# FIX: Monkey-patch _gen_shape to ensure generator is on correct device
+import torch
+original_gen_shape = gradio_app._gen_shape
+
+@spaces.GPU(duration=60)
+def _gen_shape_fixed(
+    caption=None,
+    image=None,
+    mv_image_front=None,
+    mv_image_back=None,
+    mv_image_left=None,
+    mv_image_right=None,
+    steps=50,
+    guidance_scale=7.5,
+    seed=1234,
+    octree_resolution=256,
+    check_box_rembg=False,
+    num_chunks=200000,
+    randomize_seed=False,
+):
+    # Same initial validation as original
+    if not gradio_app.MV_MODE and image is None and caption is None:
+        raise gr.Error("Please provide either a caption or an image.")
+    if gradio_app.MV_MODE:
+        if mv_image_front is None and mv_image_back is None and mv_image_left is None and mv_image_right is None:
+            raise gr.Error("Please provide at least one view image.")
+        image = {}
+        if mv_image_front:
+            image['front'] = mv_image_front
+        if mv_image_back:
+            image['back'] = mv_image_back
+        if mv_image_left:
+            image['left'] = mv_image_left
+        if mv_image_right:
+            image['right'] = mv_image_right
+
+    seed = int(randomize_seed_fn(seed, randomize_seed))
+    
+    # CRITICAL FIX: Create generator on the correct device
+    generator = torch.Generator(device=args.device)
+    generator.manual_seed(int(seed))
+    
+    logger.info(f"Fixed generator: Using seed {seed} on device {args.device}")
+    
+    # Rest of the function - call original but with our fixed generator
+    octree_resolution = int(octree_resolution)
+    if caption: print('prompt is', caption)
+    save_folder = gen_save_folder()
+    stats = {
+        'model': {
+            'shapegen': f'{args.model_path}/{args.subfolder}',
+            'texgen': f'{args.texgen_model_path}',
+        },
+        'params': {
+            'caption': caption,
+            'steps': steps,
+            'guidance_scale': guidance_scale,
+            'seed': seed,
+            'octree_resolution': octree_resolution,
+            'check_box_rembg': check_box_rembg,
+            'num_chunks': num_chunks,
+        }
+    }
+    time_meta = {}
+
+    if image is None:
+        start_time = time.time()
+        try:
+            image = gradio_app.t2i_worker(caption)
+        except Exception as e:
+            raise gr.Error(f"Text to 3D is disable.")
+        time_meta['text2image'] = time.time() - start_time
+
+    if gradio_app.MV_MODE:
+        start_time = time.time()
+        for k, v in image.items():
+            if check_box_rembg or v.mode == "RGB":
+                img = gradio_app.rmbg_worker(v.convert('RGB'))
+                image[k] = img
+        time_meta['remove background'] = time.time() - start_time
+    else:
+        if check_box_rembg or image.mode == "RGB":
+            start_time = time.time()
+            image = gradio_app.rmbg_worker(image.convert('RGB'))
+            time_meta['remove background'] = time.time() - start_time
+
+    # image to white model
+    start_time = time.time()
+
+    outputs = gradio_app.i23d_worker(
+        image=image,
+        num_inference_steps=steps,
+        guidance_scale=guidance_scale,
+        generator=generator,  # Use our fixed generator
+        octree_resolution=octree_resolution,
+        num_chunks=num_chunks,
+        output_type='mesh'
+    )
+    time_meta['shape generation'] = time.time() - start_time
+    logger.info("---Shape generation takes %s seconds ---" % (time.time() - start_time))
+
+    tmp_start = time.time()
+    mesh = gradio_app.export_to_trimesh(outputs)[0]
+    time_meta['export to trimesh'] = time.time() - tmp_start
+
+    stats['number_of_faces'] = mesh.faces.shape[0]
+    stats['number_of_vertices'] = mesh.vertices.shape[0]
+
+    stats['time'] = time_meta
+    main_image = image if not gradio_app.MV_MODE else image['front']
+    return mesh, main_image, save_folder, stats, seed
+
+# Replace the function in gradio_app
+gradio_app._gen_shape = _gen_shape_fixed
+
 # Extract on_export_click from the module after executing
 def get_on_export_click():
     """Extract the on_export_click function from gradio_app's build_app"""
