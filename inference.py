@@ -4,7 +4,8 @@ import gc
 import shutil
 import torch
 import random
-random.seed()
+# Don't seed globally - let it use system entropy
+# random.seed()  # REMOVED - this was causing the issue
 from PIL import Image
 from tqdm import tqdm
 import logging
@@ -120,10 +121,27 @@ gradio_app_module = sys.modules['gradio_app']
 exec(open('gradio_app.py').read(), gradio_app_module.__dict__)
 
 # Import the functions we need from gradio_app
-from gradio_app import generation_all, gen_save_folder, export_mesh, randomize_seed_fn, quick_convert_with_obj2gltf
+from gradio_app import generation_all, gen_save_folder, export_mesh, quick_convert_with_obj2gltf
 
-# FIX: Monkey-patch _gen_shape to ensure generator is on correct device
-import torch
+# Fixed randomize_seed_fn with guaranteed randomness
+def randomize_seed_fn_fixed(seed: int, randomize_seed: bool) -> int:
+    """Generate truly random seeds using OS-level entropy."""
+    if randomize_seed:
+        # Use OS-level randomness combined with time for guaranteed uniqueness
+        random_bytes = os.urandom(8)  # 8 bytes of cryptographically secure randomness
+        time_ns = time.time_ns()  # Nanosecond precision timestamp
+        
+        # Combine both sources of entropy
+        combined = int.from_bytes(random_bytes, 'big') + time_ns
+        seed = int(combined % gradio_app.MAX_SEED)
+        
+        logger.debug(f"Generated truly random seed: {seed}")
+    return int(seed)
+
+# Replace the randomize_seed_fn in gradio_app with our fixed version
+gradio_app.randomize_seed_fn = randomize_seed_fn_fixed
+
+# FIX: Monkey-patch _gen_shape to ensure generator is on correct device and uses proper randomization
 original_gen_shape = gradio_app._gen_shape
 
 def _gen_shape_fixed(
@@ -157,7 +175,8 @@ def _gen_shape_fixed(
         if mv_image_right:
             image['right'] = mv_image_right
 
-    seed = int(randomize_seed_fn(seed, randomize_seed))
+    # Use our fixed randomize function
+    seed = randomize_seed_fn_fixed(seed, randomize_seed)
     
     # CRITICAL FIX: Create generator on the correct device
     generator = torch.Generator(device=args.device)
@@ -347,11 +366,11 @@ def process_image(img_path, base_name, output_dir):
             mv_image_right=None,
             steps=30,
             guidance_scale=5.0,
-            seed=1234,
+            seed=1234,  # This will be randomized by randomize_seed=True
             octree_resolution=256,
             check_box_rembg=True,
             num_chunks=8000,
-            randomize_seed=True
+            randomize_seed=True  # This ensures each image gets a unique seed
         )
         
         # Unpack the results
@@ -400,7 +419,7 @@ def process_image(img_path, base_name, output_dir):
         
         # Clean up intermediate files (matching HF cleanup)
         for cleanup_path in [file_out_path, file_out2_path]:
-            if os.path.exists(cleanup_path):
+            if cleanup_path and os.path.exists(cleanup_path):
                 try:
                     os.remove(cleanup_path)
                 except:
